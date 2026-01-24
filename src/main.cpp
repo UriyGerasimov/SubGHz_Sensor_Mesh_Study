@@ -30,7 +30,8 @@ void setup() {
 void loop() { 
   // В будущем здесь будет алгоритм анализа спектра и Джиттера 
   delay(5000); 
-  Serial.println(F("[SubGHz-Study] Heartbeat: Monitoring noise for Fading Study...")); 
+  //Serial.println(F("[SubGHz-Study] Heartbeat: Monitoring noise for Fading Study...")); 
+  Serial.println(F("[SubGHz-Study] Local node: SYNC OK"));
   // Имитируем отправку пакета с данными 
   String data = "Test_Packet_"; 
   data += millis(); 
