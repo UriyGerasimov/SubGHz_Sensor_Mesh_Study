@@ -39,3 +39,27 @@
 
 # debug information files
 *.dwo
+
+# Среда сборки (PlatformIO / ESP-IDF) 
+.pio/ 
+.vscode/ 
+build/ 
+dist/ 
+
+# Артефакты компиляции (то, что нельзя светить) 
+*.bin 
+*.elf 
+*.hex 
+*.map 
+
+# Локальные конфигурации (наши будущие ключи Алитеи) 
+include/secrets.h 
+src/config_local.h 
+
+# Системный мусор 
+.DS_Store 
+Thumbs.db 
+*.log 
+
+
+
