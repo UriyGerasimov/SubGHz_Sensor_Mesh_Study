@@ -1,0 +1,256 @@
+unit UStepModel;
+interface
+uses
+  System.Classes,
+  System.SysUtils,
+  System.Generics.Defaults,
+  System.Generics.Collections,
+  System.Math;
+type
+  { 1. Базовые примитивы -------------------------------------------------------}
+  TVector3D        = array[0..2] of Double;
+  TStepSurfaceType = (stPlane, stCylindrical, stConical, stToroidal, stSpherical, stBSpline, stUnknown);
+  { 2. Геометрия (Surface) -----------------------------------------------------}
+  TStepSurface = class
+  public
+    ID:        Integer;
+    SType:     TStepSurfaceType;
+    Location:  TVector3D;
+    Normal:    TVector3D;                          // В STEP = Axis: TVector3D; // Основная нормаль или ось вращения (DIRECTION)
+    RefDir:    TVector3D;                                                       // Вспомогательное направление (для ориентации)
+    Radius:    Double;
+    SemiAngle: Double;
+  end;
+  { 3. Топология (Face) --------------------------------------------------------}
+  TStepFace = class
+  private
+    FID:       Integer;
+    FSurface:  TStepSurface;
+  public
+    constructor Create;
+    destructor Destroy; override;
+    property ID: Integer read FID write FID;
+    property Surface: TStepSurface read FSurface write FSurface;
+  end;
+  { 4. Коллекции (Списки и Словари) --------------------------------------------}
+  TLevelGroup = class(TList<TStepFace>);                                        { Важно: TStepFace уже объявлен выше, теперь можно строить списки }
+  TLevelMap   = TObjectDictionary<Double, TLevelGroup>;
+  //============================================================================
+  { 5. Модель (Container) ======================================================}
+  TStepModel = class
+  private
+                FFaces:        TObjectList<TStepFace>;
+    function    GetFaceCount:  Integer;
+    function    GetFace(Index: Integer): TStepFace;                             // Геттер для индекса
+  public
+    constructor Create;
+    destructor  Destroy; override;
+    function    GetTargetPlanes(const AttackNormal: TVector3D; Tolerance: Double = 0.0001): TList<TStepFace>;
+    function    GroupPlanesByZ(Tolerance: Double = 0.001): TLevelMap;           { Фильтрация и Группировка плоскостей по "этажам" Z }
+    property    Items[Index: Integer]: TStepFace read GetFace; default;         // <--- ДОБАВИТЬ default { СВОЙСТВО ПО УМОЛЧАНИЮ: Позволяет писать Model[i] }
+    property    Faces: TObjectList<TStepFace> read FFaces;
+    property    FaceCount: Integer read GetFaceCount;
+    function    GetVerticalCylinders: TList<TStepFace>;
+    function    GetCylindersByDiameter(ADiameter: Double; Tolerance: Double = 0.01): TList<TStepFace>; // СТРАТЕГИЧЕСКИЙ ВЫБОР: Найти все цилиндры конкретного диаметра
+    procedure   SortFacesForXWall(AList: TList<TStepFace>);                     // СТРАТЕГИЧЕСКАЯ СОРТИРОВКА: Упорядочить список "Змейкой" для X-стенки
+    function    GetCylindersByXWall(ADiameter, TargetX, Tolerance: Double): TList<TStepFace>;
+    function    GetZLevels: TLevelMap;
+  end;
+implementation
+
+{ TStepFace ====================================================================}
+constructor TStepFace.Create;
+begin
+  inherited Create;
+  FSurface := nil;
+end;
+
+destructor TStepFace.Destroy;
+begin
+  if Assigned(FSurface) then FSurface.Free;
+  inherited Destroy;
+end;
+
+{ TStepModel ===================================================================}
+constructor TStepModel.Create;
+begin
+  inherited Create;
+  FFaces := TObjectList<TStepFace>.Create(True);
+end;
+
+destructor TStepModel.Destroy;
+begin
+  FFaces.Free;
+  inherited Destroy;
+end;
+
+function TStepModel.GetFace(Index: Integer): TStepFace;
+begin
+  Result := FFaces[Index];
+end;
+
+function TStepModel.GetFaceCount: Integer;
+begin
+  Result := FFaces.Count;
+end;
+
+function TStepModel.GroupPlanesByZ(Tolerance: Double): TObjectDictionary<Double, TLevelGroup>;
+var
+  i: Integer;
+  Face: TStepFace;
+  ZKey: Double;
+  Group: TLevelGroup;
+  FoundKey: Double;
+  KeyExists: Boolean;
+begin
+  { doOwnsValues = True: Словарь сам удалит объекты TLevelGroup при Free }
+  Result := TObjectDictionary<Double, TLevelGroup>.Create([doOwnsValues]);
+
+  for i := 0 to FFaces.Count - 1 do
+  begin
+    Face := FFaces[i];
+    { Фильтруем только плоскости, нормаль которых направлена по Z (0,0,1) }
+    if (Face.Surface.SType = stPlane) and (Abs(Face.Surface.Normal[2]) > 0.99) then
+    begin
+      ZKey := Face.Surface.Location[2];
+      KeyExists := False;
+
+      { Проверка на близость Z к уже существующим ключам (борьба с погрешностью Double) }
+      for FoundKey in Result.Keys do
+        if Abs(FoundKey - ZKey) < Tolerance then
+        begin
+          ZKey := FoundKey;
+          KeyExists := True;
+          Break;
+        end;
+
+      if not KeyExists then
+      begin
+        Group := TLevelGroup.Create;
+        Result.Add(ZKey, Group);
+      end
+      else
+        Group := Result[ZKey];
+
+      Group.Add(Face);
+    end;
+  end;
+end;
+
+//==============================================================================
+function TStepModel.GetCylindersByDiameter(ADiameter: Double; Tolerance: Double): TList<TStepFace>;
+var
+  i: Integer;
+  F: TStepFace;
+begin
+  Result := TList<TStepFace>.Create;
+  for i := 0 to FFaces.Count - 1 do
+  begin
+    F := FFaces[i];
+    if (F.Surface.SType = stCylindrical) and
+       (Abs(F.Surface.Radius * 2 - ADiameter) < Tolerance) then
+      Result.Add(F);
+  end;
+end;
+
+//==============================================================================
+function TStepModel.GetZLevels: TLevelMap;
+var
+  i: Integer;
+  F: TStepFace;
+  Z: Double;
+  Group: TLevelGroup;
+begin
+  // OwnsValues = True, чтобы словарь сам чистил списки TLevelGroup
+  Result := TLevelMap.Create([doOwnsValues]);
+
+  for i := 0 to FFaces.Count - 1 do
+  begin
+    F := FFaces[i];
+    if (F.Surface.SType = stPlane) and (Abs(F.Surface.Normal[2]) > 0.99) then
+    begin
+      Z := F.Surface.Location[2];
+      if not Result.TryGetValue(Z, Group) then                                  // Ищем уровень в словаре (с учетом погрешности 0.01 мм) // Для простоты здесь используем прямой поиск, но в идеале - квантование
+      begin
+        Group := TLevelGroup.Create;
+        Result.Add(Z, Group);
+      end;
+      Group.Add(F);
+    end;
+  end;
+end;
+
+procedure TStepModel.SortFacesForXWall(AList: TList<TStepFace>);
+begin
+  AList.Sort(TComparer<TStepFace>.Construct(                                    // Сортируем список: сначала по Y (столбцы), потом по Z (строки)
+    function(const L, R: TStepFace): Integer
+    begin
+      if Abs(L.Surface.Location[1] - R.Surface.Location[1]) > 1.0 then
+        Result := CompareValue(L.Surface.Location[1], R.Surface.Location[1])    // Сравниваем Y (с допуском 1мм на неточность Компаса)
+      else
+        Result := CompareValue(L.Surface.Location[2], R.Surface.Location[2]);   // Внутри "столбца" идем по Z
+    end));
+end;
+//==============================================================================
+function TStepModel.GetCylindersByXWall(ADiameter, TargetX, Tolerance: Double): TList<TStepFace>;
+var
+  i: Integer;
+  F: TStepFace;
+begin
+  Result := TList<TStepFace>.Create;
+  for i := 0 to FFaces.Count - 1 do
+  begin
+    F := FFaces[i];
+    if (F.Surface.SType = stCylindrical) then
+    begin
+      if Abs(F.Surface.Radius * 2 - ADiameter) < Tolerance then                 // Условие 1: Диаметр совпадает
+      begin
+        if Abs(F.Surface.Location[0] - TargetX) < Tolerance then                // Условие 2: Центр отверстия лежит НА НАШЕЙ СТЕНКЕ X
+          Result.Add(F);
+      end;
+    end;
+  end;
+  Writeln('STRATEGY: Found ', Result.Count, ' holes on wall X = ', TargetX:0:3);
+end;
+//==============================================================================
+function TStepModel.GetVerticalCylinders: TList<TStepFace>;
+var
+  i: Integer;
+  F: TStepFace;
+  Dot: Double;
+begin
+  Result := TList<TStepFace>.Create;
+  for i := 0 to FFaces.Count - 1 do
+  begin
+    F := FFaces[i];
+    if (F.Surface.SType = stCylindrical) then
+    begin
+      Dot := Abs(F.Surface.Normal[2]); if Dot > 0.999 then Result.Add(F);       // Проверяем, что ось цилиндра вертикальна (0,0,1)
+    end;
+  end;
+end;
+//==============================================================================
+function TStepModel.GetTargetPlanes(const AttackNormal: TVector3D; Tolerance: Double): TList<TStepFace>;
+var
+  i: Integer;
+  F: TStepFace;
+  DotProduct: Double;
+begin
+  Result := TList<TStepFace>.Create;
+  for i := 0 to FFaces.Count - 1 do
+  begin
+    F := FFaces[i];
+    if Assigned(F.Surface) and (F.Surface.SType = stPlane) then                 // Проверяем, что поверхность проинициализирована и это плоскость
+    begin
+      DotProduct := (F.Surface.Normal[0] * AttackNormal[0]) +                   // СКАЛЯРНОЕ ПРОИЗВЕДЕНИЕ (Вектор Нормали на Вектор Атаки)
+                    (F.Surface.Normal[1] * AttackNormal[1]) +
+                    (F.Surface.Normal[2] * AttackNormal[2]);
+      if Abs(DotProduct - 1.0) < Tolerance then Result.Add(F);                  // Если косинус угла близок к 1.0 — плоскости параллельны
+    end;
+  end;
+end;
+//==============================================================================
+//==============================================================================
+end.
+
+
